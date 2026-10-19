@@ -249,6 +249,25 @@ pub(crate) fn devmode_paper(dev_mode: &[u8]) -> Option<((u32, u32), bool)> {
     Some(((u32::from(width.unsigned_abs()) * 100, u32::from(length.unsigned_abs()) * 100), landscape))
 }
 
+/// The longest short side of a label printer's paper, in micrometres (4.5 in).
+pub(crate) const LABEL_MAX_SHORT_SIDE: u32 = 114_300;
+
+/// Whether a driver offering `colours` (PageOutputColor option keywords) on `paper` (micrometres)
+/// is a thermal label printer: monochrome only, label-sized paper. A monochrome office printer
+/// or a fax has Letter or A4; a label printer that also offers colour is left to its driver.
+pub(crate) fn label_shaped(colours: &[&str], paper: Option<(u32, u32)>) -> bool {
+    !colours.is_empty()
+        && colours.iter().all(|c| *c == "Monochrome")
+        && paper.is_some_and(|(w, h)| w > 0 && h > 0 && w.min(h) <= LABEL_MAX_SHORT_SIDE)
+}
+
+/// A ticket's PageMediaSize, in micrometres; `None` without one or for a roll.
+pub(crate) fn media_size(xml: &str) -> Option<(u32, u32)> {
+    let document = roxmltree::Document::parse(xml).ok()?;
+    let media = document.root_element().children().find(|n| n.has_tag_name((NS_PSF, "Feature")) && named(*n, "PageMediaSize"))?;
+    integer(media, "ScoredProperty", "MediaSizeWidth").zip(integer(media, "ScoredProperty", "MediaSizeHeight")).filter(|(w, h)| *w > 0 && *h > 0)
+}
+
 /// The keyword of a ticket's PageMediaSize option, without its namespace prefix
 /// (`NorthAmericaLetter`, a vendor's `User0000000256`): what [`crate::PrinterPaper::key`] holds.
 pub(crate) fn media_keyword(xml: &str) -> Option<String> {
@@ -413,6 +432,19 @@ mod tests {
         assert!(turned(false, label), "an upright sheet on a wide label stock is turned");
         assert!(turned(true, None) && !turned(false, None), "no paper known: the sheet's shape, as on upright paper");
         assert!(!turned(false, Some((100_000, 100_000))) && turned(true, Some((100_000, 100_000))), "a square paper is upright");
+    }
+
+    #[test]
+    fn a_label_printer_is_monochrome_only_on_label_sized_paper() {
+        let label = Some((38_100, 25_400)); // 1.5 × 1 in
+        let four_by_six = Some((101_600, 152_400));
+        let letter = Some((215_900, 279_400));
+        assert!(label_shaped(&["Monochrome"], label) && label_shaped(&["Monochrome"], four_by_six));
+        assert!(!label_shaped(&["Monochrome"], letter), "a fax or a monochrome laser");
+        assert!(!label_shaped(&["Monochrome", "Color"], label), "a colour label printer keeps its driver's way");
+        assert!(!label_shaped(&[], label) && !label_shaped(&["Monochrome"], None) && !label_shaped(&["Monochrome"], Some((0, 25_400))));
+        assert_eq!(media_size(&validated((38_100, 25_400), "psk:Portrait", None)), Some((38_100, 25_400)));
+        assert_eq!(media_size("not xml"), None);
     }
 
     #[test]

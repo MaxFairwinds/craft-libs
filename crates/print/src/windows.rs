@@ -93,6 +93,20 @@ fn capabilities_for(device: &PrinterDevice, base: Option<&PrintTicket>) -> Resul
     .map_err(spool_error)
 }
 
+/// [`crate::is_label_printer`]: the driver's PageOutputColor options and the paper of the user's
+/// settings ([`ticket::label_shaped`]).
+pub(crate) fn is_label_printer(printer: &str) -> bool {
+    let Ok(devices) = PrinterDevice::all() else { return false };
+    let Some(device) = devices.iter().find(|d| d.name() == printer) else { return false };
+    let base = user_ticket(device);
+    let Ok(capabilities) = capabilities_for(device, base.as_ref()) else { return false };
+    let colour = OwnedName::qualified("PageOutputColor", NS_PSK, Some("psk"));
+    let colours: Vec<String> = capabilities.options_for_feature(colour).filter_map(|o| o.name.as_ref().map(|n| n.local_name.clone())).collect();
+    let colours: Vec<&str> = colours.iter().map(String::as_str).collect();
+    let paper = base.as_ref().and_then(|t| std::str::from_utf8(t.get_xml()).ok()).and_then(ticket::media_size);
+    ticket::label_shaped(&colours, paper)
+}
+
 /// The keyword of the driver's current default paper: the user's settings' paper, else an empty
 /// ticket merged and validated, which comes back complete at the printer's defaults (the stock a
 /// label printer is set up for, an office printer's tray paper). `None` when the driver won't say.
