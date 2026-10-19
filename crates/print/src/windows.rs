@@ -40,7 +40,7 @@ pub(crate) fn printers() -> Vec<Printer> {
 /// option for the feature the job's ticket sets. `None` when the capabilities can't be read. A
 /// driver without one cannot confirm an explicit two-sided request, which is refused before submission.
 fn two_sided(device: &PrinterDevice) -> Option<bool> {
-    let capabilities = PrintCapabilities::fetch(device).ok()?;
+    let capabilities = capabilities_for(device, user_ticket(device).as_ref()).ok()?;
     let duplex = OwnedName::qualified("JobDuplexAllDocumentsContiguously", NS_PSK, Some("psk"));
     Some(capabilities.options_for_feature(duplex).any(|o| o.name.as_ref().is_some_and(|n| n.local_name.starts_with("TwoSided"))))
 }
@@ -53,8 +53,9 @@ pub(crate) fn printer_papers(printer: &str) -> Vec<PrinterPaper> {
     const MAX_SIDE: f64 = 14_400.0;
     let Ok(devices) = PrinterDevice::all() else { return Vec::new() };
     let Some(device) = devices.iter().find(|d| d.name() == printer) else { return Vec::new() };
-    let Ok(capabilities) = PrintCapabilities::fetch(device) else { return Vec::new() };
-    let default_key = default_media_keyword(device);
+    let base = user_ticket(device);
+    let Ok(capabilities) = capabilities_for(device, base.as_ref()) else { return Vec::new() };
+    let default_key = default_media_keyword(device, base.as_ref());
     let mut out: Vec<PrinterPaper> = Vec::new();
     for media in capabilities.page_media_sizes() {
         if out.len() >= crate::MAX_PRINTER_PAPERS {
@@ -73,10 +74,32 @@ pub(crate) fn printer_papers(printer: &str) -> Vec<PrinterPaper> {
     out
 }
 
-/// The keyword of the driver's current default paper: an empty ticket merged and validated comes
-/// back complete, at the driver's defaults (the stock a label printer is set up for, an office
-/// printer's tray paper). `None` when the driver won't say.
-fn default_media_keyword(device: &PrinterDevice) -> Option<String> {
+/// The signed-in user's own settings for the printer as a job ticket: what they set in its
+/// Printing Preferences (`PrintTicket::user_default`). Windows' Print Ticket calls otherwise work
+/// from the printer's Printing Defaults, which can hold another label stock, another darkness and
+/// no cut (a Zebra ZD500 whose defaults said 4.09 × 3.00 in, darkness 10, while the user had set
+/// 2.25 × 1.25 in, darkness 22); every ticket and capabilities request here starts from this one.
+/// `None` when the driver won't say, and then the printer's defaults apply as before.
+fn user_ticket(device: &PrinterDevice) -> Option<PrintTicket> {
+    PrintTicket::user_default(device).ok()
+}
+
+/// The driver's capabilities for the user's settings, else for the printer's defaults.
+fn capabilities_for(device: &PrinterDevice, base: Option<&PrintTicket>) -> Result<PrintCapabilities, Error> {
+    match base {
+        Some(base) => PrintCapabilities::fetch_for_ticket(device, base).or_else(|_| PrintCapabilities::fetch(device)),
+        None => PrintCapabilities::fetch(device),
+    }
+    .map_err(spool_error)
+}
+
+/// The keyword of the driver's current default paper: the user's settings' paper, else an empty
+/// ticket merged and validated, which comes back complete at the printer's defaults (the stock a
+/// label printer is set up for, an office printer's tray paper). `None` when the driver won't say.
+fn default_media_keyword(device: &PrinterDevice, base: Option<&PrintTicket>) -> Option<String> {
+    if let Some(key) = base.and_then(|t| std::str::from_utf8(t.get_xml()).ok()).and_then(ticket::media_keyword) {
+        return Some(key);
+    }
     let mut builder = PrintTicketBuilder::new(device).ok()?;
     builder.merge(PrintTicket::from_xml(winprint::ticket::DEFAULT_PRINT_TICKET_XML)).ok()?;
     let validated = builder.build().ok()?;
@@ -115,7 +138,8 @@ fn select_device(devices: Vec<PrinterDevice>, requested: Option<&str>, default: 
 /// driver changed the paper, the orientation or the scaling: then nothing is sent, rather than a
 /// job at the wrong size.
 fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape: bool) -> Result<DriverTicket, Error> {
-    let capabilities = PrintCapabilities::fetch(device).map_err(spool_error)?;
+    let base = user_ticket(device);
+    let capabilities = capabilities_for(device, base.as_ref())?;
     // Whether the driver has a two-sided feature at all: a label printer's doesn't, and its
     // answer to a one-sided request is then not judged (see `ticket::verify_job_options`).
     let duplex_offered =
@@ -150,7 +174,7 @@ fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape
     // A sheet that matches none of the driver's papers (shrink to fit) is printed on the driver's
     // default paper, so the turn is judged against that one.
     let fed = wanted.or_else(|| {
-        let key = default_media_keyword(device)?;
+        let key = default_media_keyword(device, base.as_ref())?;
         let m = medias.iter().find(|m| m.option().name.as_ref().is_some_and(|n| n.local_name == key))?;
         Some((m.size().width_in_micron(), m.size().height_in_micron()))
     });
@@ -181,7 +205,12 @@ fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape
         });
     }
     let requested_xml = PrintTicket::from(document).into_xml();
+    // The job starts from the user's own settings (stock, darkness, cutter: the driver's private
+    // features ride along) and the job's options are merged over them.
     let mut builder = PrintTicketBuilder::new(device).map_err(spool_error)?;
+    if let Some(base) = &base {
+        builder.merge(base.clone()).map_err(spool_error)?;
+    }
     builder.merge(PrintTicket::from_xml(requested_xml.clone())).map_err(spool_error)?;
     let validated = builder.build().map_err(spool_error)?;
     let xml = std::str::from_utf8(validated.get_xml()).map_err(spool_error)?;

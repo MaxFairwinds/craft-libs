@@ -54,7 +54,11 @@ and the printer's Printing Defaults disagree the merged ticket names the default
 while the job prints on the preferences'. When the driver settles on the paper asked for,
 the ticket asked for is printed with. A driver with no two-sided feature at all (a label
 printer) is not asked to confirm one-sided printing: it can print nothing else; two-sided
-asked of it is refused. A sheet is turned (landscape) only when its shape differs from the
+asked of it is refused. Every ticket and capabilities request starts from the signed-in user's own settings
+(winprint's `PrintTicket::user_default`, their Printing Preferences), not the printer's
+Printing Defaults, which Windows' Print Ticket calls fall back to: on a Zebra ZD500 the
+defaults held another stock, another darkness and tear-off where the user had set cutting,
+and the driver's private settings ride in the ticket (`PageDevmodeSnapshot`). A sheet is turned (landscape) only when its shape differs from the
 paper's as the driver feeds it: a wide sheet on upright office paper is, a wide sheet on a
 label stock that is itself wider than tall is not.
 

@@ -21,7 +21,9 @@ workspace = true
 # feature downloads PDFium at build time and is off. The maintained BSD-3-Clause fork
 # preserves terminal failures/cancellation and bounds the completion notification wait.
 # Pinned to an immutable revision; review before bumping.
-winprint = { git = "https://github.com/storytold/winprint.rs", rev = "5f80b9baf6b58937c401656634e42d33f00ddf49", default-features = false }
+# storytold/winprint.rs main plus PrintTicket::user_default and PrintCapabilities::fetch_for_ticket
+# (MaxFairwinds/winprint.rs feat/user-default-ticket; to move to storytold/winprint.rs once merged).
+winprint = { git = "https://github.com/MaxFairwinds/winprint.rs", rev = "57f943a12d420e3eef89ade0d11c3f9977a3f240", default-features = false }
 # GetDefaultPrinter (MIT).
 winsafe = { version = "0.0.29", default-features = false, features = ["winspool"] }
 # The job file's private folder.
