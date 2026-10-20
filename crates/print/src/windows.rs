@@ -55,7 +55,7 @@ pub(crate) fn printer_papers(printer: &str) -> Vec<PrinterPaper> {
     let Some(device) = devices.iter().find(|d| d.name() == printer) else { return Vec::new() };
     let base = user_ticket(device);
     let Ok(capabilities) = capabilities_for(device, base.as_ref()) else { return Vec::new() };
-    let default_key = default_media_keyword(device, base.as_ref());
+    let default_key = default_media_keyword(device, base.as_ref(), &capabilities);
     let mut out: Vec<PrinterPaper> = Vec::new();
     for media in capabilities.page_media_sizes() {
         if out.len() >= crate::MAX_PRINTER_PAPERS {
@@ -107,11 +107,16 @@ pub(crate) fn is_label_printer(printer: &str) -> bool {
     ticket::label_shaped(&colours, paper)
 }
 
-/// The keyword of the driver's current default paper: the user's settings' paper, else an empty
-/// ticket merged and validated, which comes back complete at the printer's defaults (the stock a
-/// label printer is set up for, an office printer's tray paper). `None` when the driver won't say.
-fn default_media_keyword(device: &PrinterDevice, base: Option<&PrintTicket>) -> Option<String> {
-    if let Some(key) = base.and_then(|t| std::str::from_utf8(t.get_xml()).ok()).and_then(ticket::media_keyword) {
+/// The keyword of the driver's current default paper among `capabilities`' papers: the user's
+/// settings' paper when the capabilities have it, else an empty ticket merged and validated, which
+/// comes back complete at the printer's defaults (the stock a label printer is set up for, an
+/// office printer's tray paper); the capabilities fall back to the printer's defaults when the
+/// user's can't be read, and then so does the default. `None` when the driver won't say.
+fn default_media_keyword(device: &PrinterDevice, base: Option<&PrintTicket>, capabilities: &PrintCapabilities) -> Option<String> {
+    let offered = |key: &str| capabilities.page_media_sizes().any(|m| m.option().name.as_ref().is_some_and(|n| n.local_name == key));
+    if let Some(key) = base.and_then(|t| std::str::from_utf8(t.get_xml()).ok()).and_then(ticket::media_keyword)
+        && offered(&key)
+    {
         return Some(key);
     }
     let mut builder = PrintTicketBuilder::new(device).ok()?;
@@ -188,7 +193,7 @@ fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape
     // A sheet that matches none of the driver's papers (shrink to fit) is printed on the driver's
     // default paper, so the turn is judged against that one.
     let fed = wanted.or_else(|| {
-        let key = default_media_keyword(device, base.as_ref())?;
+        let key = default_media_keyword(device, base.as_ref(), &capabilities)?;
         let m = medias.iter().find(|m| m.option().name.as_ref().is_some_and(|n| n.local_name == key))?;
         Some((m.size().width_in_micron(), m.size().height_in_micron()))
     });
@@ -234,8 +239,15 @@ fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape
     // the user's Printing Preferences but not in the printer's Printing Defaults (Zebra's) names
     // the defaults' size there while printing on the preferences'. So when the driver settles on
     // the paper asked for, the ticket asked for is the one printed with, and the merged ticket is
-    // only held to the rest; otherwise the merged ticket is held to the paper as well.
+    // only held to the rest; otherwise the merged ticket is held to the paper as well. The ticket
+    // asked for is laid over the user's settings, so their private features (a cutter, a
+    // darkness, a finisher) are printed with too: the spooler merges a job's ticket onto the
+    // printer's defaults, not the user's.
     let requested = PrintTicket::from_xml(requested_xml);
+    let requested = match &base {
+        Some(base) => overlay(base, &requested)?,
+        None => requested,
+    };
     let settled = requested.to_dev_mode(device).ok().and_then(|dev_mode| ticket::devmode_paper(&dev_mode));
     let same = |a: (u32, u32), b: (u32, u32)| a.0.abs_diff(b.0) <= ticket::PAPER_TOLERANCE && a.1.abs_diff(b.1) <= ticket::PAPER_TOLERANCE;
     if let (Some((size, settled_landscape)), Some(want)) = (settled, wanted)
@@ -247,6 +259,21 @@ fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape
     }
     let paper = ticket::verify_ticket(xml, wanted, turned, !scaling_offered.is_empty())?;
     Ok(DriverTicket { ticket: validated.clone(), validated, paper, duplex_offered })
+}
+
+/// `over` laid over `base`: each of `over`'s features, parameters and properties replaces
+/// `base`'s of the same name, and the rest of `base` is kept.
+fn overlay(base: &PrintTicket, over: &PrintTicket) -> Result<PrintTicket, Error> {
+    let same = |a: &OwnedName, b: &OwnedName| a.local_name == b.local_name && a.namespace == b.namespace;
+    let mut document = PrintTicketDocument::parse_from_bytes(base.get_xml()).map_err(spool_error)?;
+    let top = PrintTicketDocument::parse_from_bytes(over.get_xml()).map_err(spool_error)?;
+    document.features.retain(|f| !top.features.iter().any(|t| same(&t.name, &f.name)));
+    document.features.extend(top.features);
+    document.parameter_inits.retain(|p| !top.parameter_inits.iter().any(|t| same(&t.name, &p.name)));
+    document.parameter_inits.extend(top.parameter_inits);
+    document.properties.retain(|p| !top.properties.iter().any(|t| same(&t.name, &p.name)));
+    document.properties.extend(top.properties);
+    Ok(PrintTicket::from(document))
 }
 
 /// The widest unprintable margin of the ticket's paper, in points; 0 when the driver doesn't say.
