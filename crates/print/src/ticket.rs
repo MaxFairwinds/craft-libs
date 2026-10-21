@@ -432,6 +432,12 @@ mod tests {
         assert!(turned(false, label), "an upright sheet on a wide label stock is turned");
         assert!(turned(true, None) && !turned(false, None), "no paper known: the sheet's shape, as on upright paper");
         assert!(!turned(false, Some((100_000, 100_000))) && turned(true, Some((100_000, 100_000))), "a square paper is upright");
+        // A MUNBYN ITPP941's native 60 × 40 mm form (storytold/pdfcraft#2673): a wide sheet is not
+        // turned a second time, and its upright 102.1 × 152.15 mm form turns a wide sheet as usual.
+        let munbyn = Some((60_000, 40_000));
+        assert!(!turned(true, munbyn) && turned(false, munbyn));
+        let upright_label = Some((102_100, 152_150));
+        assert!(turned(true, upright_label) && !turned(false, upright_label));
     }
 
     #[test]
